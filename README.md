@@ -1,4 +1,4 @@
-# Cryptsp: The Next Generation Cryptography Library 
+# Cryptsp: The Next Generation Cryptography Library (Testing Phase)
 
 ### **Secure, Powerful, and Ready for the Future**
 
