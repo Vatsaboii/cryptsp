@@ -4,7 +4,8 @@ from Crypto.PublicKey import RSA, ECC
 from Crypto.Cipher import PKCS1_OAEP
 from Crypto.Signature import pss, DSS
 from Crypto.Hash import SHA256, SHA512, HMAC
-from Crypto.Protocol.KDF import PBKDF2, scrypt
+from Crypto.Protocol.KDF import PBKDF2, scrypt, HKDF
+from Crypto.Random import get_random_bytes
 from base64 import b64encode, b64decode
 import hashlib
 import os
@@ -13,6 +14,7 @@ from typing import Union, Dict, Tuple, Optional
 from dataclasses import dataclass
 from jwt import encode as jwt_encode, decode as jwt_decode, ExpiredSignatureError
 from bcrypt import hashpw, gensalt, checkpw
+from argon2 import PasswordHasher
 
 class CryptoException(Exception):
     """Base exception class for cryptography operations."""
@@ -54,16 +56,26 @@ class CryptoManager:
     def __init__(self, default_key_size: int = 32):
         """Initialize with default key size in bytes."""
         self.default_key_size = default_key_size
+        self.ph = PasswordHasher()  # For Argon2
 
     def generate_key(self, size: Optional[int] = None) -> bytes:
         """Generate a secure random key."""
         return os.urandom(size or self.default_key_size)
 
-    def derive_key(self, password: str, salt: bytes = None, iterations: int = 100000) -> Tuple[bytes, bytes]:
-        """Derive a key from a password using PBKDF2."""
+    def derive_key(self, password: str, salt: bytes = None, iterations: int = 100000, 
+                   algorithm: str = 'PBKDF2') -> Tuple[bytes, bytes]:
+        """Derive a key from a password using PBKDF2 or Argon2."""
         if salt is None:
             salt = os.urandom(16)
-        key = PBKDF2(password.encode(), salt, dkLen=32, count=iterations)
+        
+        if algorithm == 'PBKDF2':
+            key = PBKDF2(password.encode(), salt, dkLen=32, count=iterations)
+        elif algorithm == 'Argon2':
+            key = self.ph.hash(password.encode(), salt=salt).encode()
+            key = hashlib.sha256(key).digest()  # Derive a 32-byte key
+        else:
+            raise CryptoException(f"Unsupported key derivation algorithm: {algorithm}")
+        
         return key, salt
 
     def encrypt_aes(self, data: Union[str, bytes], key: bytes, mode: str = 'GCM') -> EncryptedData:
@@ -79,6 +91,10 @@ class CryptoManager:
             cipher = AES.new(key, AES.MODE_CBC)
             ciphertext = cipher.encrypt(pad(data, AES.block_size))
             return EncryptedData('AES-CBC', ciphertext, iv=cipher.iv)
+        elif mode == 'CTR':
+            cipher = AES.new(key, AES.MODE_CTR)
+            ciphertext = cipher.encrypt(data)
+            return EncryptedData('AES-CTR', ciphertext, nonce=cipher.nonce)
         else:
             raise CryptoException(f"Unsupported AES mode: {mode}")
 
@@ -90,6 +106,9 @@ class CryptoManager:
         elif encrypted_data.algorithm == 'AES-CBC':
             cipher = AES.new(key, AES.MODE_CBC, iv=encrypted_data.iv)
             return unpad(cipher.decrypt(encrypted_data.ciphertext), AES.block_size)
+        elif encrypted_data.algorithm == 'AES-CTR':
+            cipher = AES.new(key, AES.MODE_CTR, nonce=encrypted_data.nonce)
+            return cipher.decrypt(encrypted_data.ciphertext)
         else:
             raise CryptoException(f"Unsupported algorithm: {encrypted_data.algorithm}")
 
@@ -106,6 +125,26 @@ class CryptoManager:
         """Decrypt ChaCha20-Poly1305 encrypted data."""
         cipher = ChaCha20_Poly1305.new(key=key, nonce=encrypted_data.nonce)
         return cipher.decrypt_and_verify(encrypted_data.ciphertext, encrypted_data.tag)
+
+    def encrypt_salsa20(self, data: Union[str, bytes], key: bytes) -> EncryptedData:
+        """Encrypt data using Salsa20."""
+        if isinstance(data, str):
+            data = data.encode()
+        
+        nonce = get_random_bytes(8)  # Salsa20 uses an 8-byte nonce
+        cipher = Salsa20.new(key=key, nonce=nonce)
+        ciphertext = cipher.encrypt(data)
+        return EncryptedData('SALSA20', ciphertext, nonce=nonce)
+
+    def decrypt_salsa20(self, encrypted_data: EncryptedData, key: bytes) -> bytes:
+        """Decrypt Salsa20 encrypted data."""
+        cipher = Salsa20.new(key=key, nonce=encrypted_data.nonce)
+        return cipher.decrypt(encrypted_data.ciphertext)
+
+    def generate_ecc_keypair(self, curve: str = 'P-256') -> Tuple[ECC.EccKey, ECC.EccKey]:
+        """Generate ECC key pair."""
+        key = ECC.generate(curve=curve)
+        return key, key.public_key()
 
     def generate_rsa_keypair(self, key_size: int = 2048) -> Tuple[RSA.RsaKey, RSA.RsaKey]:
         """Generate RSA key pair."""
@@ -124,10 +163,52 @@ class CryptoManager:
         cipher = PKCS1_OAEP.new(private_key)
         return cipher.decrypt(encrypted_data)
 
-    def generate_ecc_keypair(self, curve: str = 'P-256') -> Tuple[ECC.EccKey, ECC.EccKey]:
-        """Generate ECC key pair."""
-        key = ECC.generate(curve=curve)
-        return key, key.public_key()
+    def encrypt_ecies(self, data: Union[str, bytes], public_key: ECC.EccKey) -> EncryptedData:
+        """Encrypt data using ECIES (Elliptic Curve Integrated Encryption Scheme)."""
+        if isinstance(data, str):
+            data = data.encode()
+        
+        ephemeral_key = ECC.generate(curve='P-256')
+        shared_key = ephemeral_key.d * public_key.pointQ  
+        shared_key = hashlib.sha256(shared_key.x.to_bytes(32, 'big')).digest()  # Derive symmetric key
+        
+        cipher = AES.new(shared_key, AES.MODE_GCM)
+        ciphertext, tag = cipher.encrypt_and_digest(data)
+        
+        ephemeral_pubkey = ephemeral_key.public_key().export_key(format='DER')
+        
+        return EncryptedData('ECIES', ciphertext, nonce=cipher.nonce, tag=tag, iv=ephemeral_pubkey)
+
+    def decrypt_ecies(self, encrypted_data: EncryptedData, private_key: ECC.EccKey) -> bytes:
+        """Decrypt ECIES encrypted data."""
+        ephemeral_pubkey = ECC.import_key(encrypted_data.iv)
+        
+        shared_key = private_key.d * ephemeral_pubkey.pointQ
+        shared_key = hashlib.sha256(shared_key.x.to_bytes(32, 'big')).digest()  # Derive symmetric key
+        
+        cipher = AES.new(shared_key, AES.MODE_GCM, nonce=encrypted_data.nonce)
+        return cipher.decrypt_and_verify(encrypted_data.ciphertext, encrypted_data.tag)
+
+    def create_hmac(self, data: Union[str, bytes], key: bytes, hash_algo: str = 'SHA256') -> bytes:
+        """Create HMAC for data authentication."""
+        if isinstance(data, str):
+            data = data.encode()
+            
+        if hash_algo == 'SHA256':
+            h = HMAC.new(key, digestmod=SHA256)
+        elif hash_algo == 'SHA512':
+            h = HMAC.new(key, digestmod=SHA512)
+        else:
+            raise CryptoException(f"Unsupported hash algorithm: {hash_algo}")
+            
+        h.update(data)
+        return h.digest()
+
+    def verify_hmac(self, data: Union[str, bytes], hmac: bytes, key: bytes, 
+                    hash_algo: str = 'SHA256') -> bool:
+        """Verify HMAC."""
+        calculated_hmac = self.create_hmac(data, key, hash_algo)
+        return hmac == calculated_hmac
 
     def sign_data(self, data: Union[str, bytes], private_key: Union[RSA.RsaKey, ECC.EccKey]) -> bytes:
         """Sign data using RSA or ECC private key."""
@@ -158,27 +239,6 @@ class CryptoManager:
             return True
         except (ValueError, TypeError):
             return False
-
-    def create_hmac(self, data: Union[str, bytes], key: bytes, hash_algo: str = 'SHA256') -> bytes:
-        """Create HMAC for data authentication."""
-        if isinstance(data, str):
-            data = data.encode()
-            
-        if hash_algo == 'SHA256':
-            h = HMAC.new(key, digestmod=SHA256)
-        elif hash_algo == 'SHA512':
-            h = HMAC.new(key, digestmod=SHA512)
-        else:
-            raise CryptoException(f"Unsupported hash algorithm: {hash_algo}")
-            
-        h.update(data)
-        return h.digest()
-
-    def verify_hmac(self, data: Union[str, bytes], hmac: bytes, key: bytes, 
-                    hash_algo: str = 'SHA256') -> bool:
-        """Verify HMAC."""
-        calculated_hmac = self.create_hmac(data, key, hash_algo)
-        return hmac == calculated_hmac
 
     def encrypt_file(self, file_path: str, key: bytes, algorithm: str = 'AES-GCM') -> str:
         """Encrypt a file and save the encrypted version."""
@@ -215,4 +275,3 @@ class CryptoManager:
             f.write(decrypted_data)
             
         return output_path
-
