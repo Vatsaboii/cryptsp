@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cryptsp"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
   { name="Srivatsa Palepu", email="vatsaboii36@gmail.com" },
 ]
@@ -16,6 +16,7 @@ dependencies = [
     "python-jwt>=4.0.0",
     "bcrypt>=4.0.1",
     "pyjwt>=2.10.1",
+    "argon2-cffi>=23.1.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
