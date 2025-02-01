@@ -34,29 +34,25 @@ pip install cryptsp
 ### 1. Encrypt and Decrypt with AES
 
 ```python
-from cryptsp import AES
+manager = CryptoManager()
+key = manager.generate_key()
+encrypted_data = manager.encrypt_aes("Hello, AES-GCM!", key, mode='GCM')
+decrypted_data = manager.decrypt_aes(encrypted_data, key)
+print("Decrypted (AES-GCM):", decrypted_data.decode())
 
-key = AES.generate_key()
-plaintext = "Hello, Cryptsp!"
-ciphertext, nonce = AES.encrypt(plaintext, key)
-decrypted_text = AES.decrypt(ciphertext, key, nonce)
-
-print("Ciphertext:", ciphertext)
-print("Decrypted Text:", decrypted_text)
+print("Ciphertext:", encrypted_data)
+print("Decrypted Text:", decrypted_data)
 ```
 
 ### 2. RSA Encryption and Decryption
 
 ```python
-from cryptsp import RSA
+from cryptsp import CryptoManager
 
-public_key, private_key = RSA.generate_keys()
-message = "Secure Message"
-ciphertext = RSA.encrypt(message, public_key)
-decrypted_message = RSA.decrypt(ciphertext, private_key)
-
-print("Ciphertext:", ciphertext)
-print("Decrypted Message:", decrypted_message)
+private_key, public_key = manager.generate_rsa_keypair()
+encrypted_data = manager.encrypt_rsa("Hello, RSA!", public_key)
+decrypted_data = manager.decrypt_rsa(encrypted_data, private_key)
+print("Decrypted (RSA):", decrypted_data.decode())
 ```
 
 ## GitHub Repository
